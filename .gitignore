@@ -1,0 +1,11 @@
+*.sqlite3
+.env
+.DS_Store
+.coverage
+/media
+/build
+uwsgi.*
+*.backup
+/.venv
+__pycache__
+
