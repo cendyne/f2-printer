@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "f2_printer"
+version = "0.1.0"
+description = "Prints badges"
+authors = ["Cendyne <cendyne@cendyne.dev>"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "f2_printer"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+prompt-toolkit = "^3.0.37"
+pillow = "^9.4.0"
+img2pdf = "^0.4.4"
+aiohttp = "^3.8.4"
+
+
+[tool.poetry.group.dev.dependencies]
+autopep8 = "^2.0.1"
+
+[tool.poetry.scripts]
+print = "f2_printer.main:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

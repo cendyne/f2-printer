@@ -8,4 +8,7 @@ uwsgi.*
 *.backup
 /.venv
 __pycache__
-
+config.json
+/config
+dist
+/pdf/
