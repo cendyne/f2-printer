@@ -103,6 +103,7 @@ class PrinterApi:
     async_tasks: dict[str, asyncio.Task]
     last_print: datetime.datetime | None
     disabled_reasons: dict[str, str]
+    printing_reasons: dict[str, str]
 
     def __init__(self) -> None:
         self.pending_event = asyncio.Event()
@@ -117,6 +118,7 @@ class PrinterApi:
         self.async_tasks = {}
         self.last_print = None
         self.disabled_reasons = {}
+        self.printing_reasons = {}
         pass
 
     async def watch_jobs(self) -> None:
@@ -186,7 +188,7 @@ class PrinterApi:
                 if job_change:
                     self.jobs_changed_event.set()
 
-    def parse_status(self, line: str) -> tuple[str, PrinterStatus, str | None] | None:
+    def parse_status(self, line: str) -> tuple[str, PrinterStatus, str | None, str | None] | None:
         parts = re.split("\s+", line)
 
         if parts[0] == 'printer':
@@ -198,15 +200,22 @@ class PrinterApi:
                     if parts[i] == '-':
                         reason = " ".join(parts[i+1:])
                         break
-                return (printer, PrinterStatus.DISABLED, reason)
+                return (printer, PrinterStatus.DISABLED, reason, None)
             if parts[2] == 'is' and parts[3] == 'idle.' and parts[4] == 'enabled':
                 return (printer, PrinterStatus.IDLE, None)
             if parts[2] == 'now' and parts[3] == 'printing':
                 job = parts[4]
                 if job.endswith("."):
                     job = job[0:-1]
-                return (printer, PrinterStatus.PRINTING, job)
-            return (printer, PrinterStatus.UNKNOWN, None)
+                timezone_part = 5
+                for i in range(5, len(parts)):
+                    t = parts[i]
+                    if re.match("[CMPEH][AO]?[DS]?T|AK|UTC|GMT", t):
+                        timezone_part = i
+                        break
+                status = " ".join(parts[timezone_part+1:])
+                return (printer, PrinterStatus.PRINTING, job, status)
+            return (printer, PrinterStatus.UNKNOWN, None, None)
         return None
 
     async def poll_status(self):
@@ -214,6 +223,7 @@ class PrinterApi:
         active_jobs = set()
         active_jobs_kv = dict()
         disabled_reasons = {}
+        printing_reasons = {}
         params = [
             'lpstat',
             '-p'
@@ -240,6 +250,8 @@ class PrinterApi:
                 if result[1] == PrinterStatus.PRINTING and result[2]:
                     active_jobs.add(result[2])
                     active_jobs_kv[result[0]] = result[2]
+                    if result[3]:
+                        printing_reasons[result[0]] = result[3]
                 if result[1] == PrinterStatus.DISABLED and result[2]:
                     disabled_reasons[result[0]] = result[2]
             last_line = line
@@ -250,12 +262,15 @@ class PrinterApi:
                 if result[1] == PrinterStatus.PRINTING and result[2]:
                     active_jobs.add(result[2])
                     active_jobs_kv[result[0]] = result[2]
+                    if result[3]:
+                        printing_reasons[result[0]] = result[3]
                 if result[1] == PrinterStatus.DISABLED and result[2]:
                     disabled_reasons[result[0]] = result[2]
         self.status = status
         self.active_jobs = active_jobs
         self.active_jobs_kv = active_jobs_kv
         self.disabled_reasons = disabled_reasons
+        self.printing_reasons = printing_reasons
         # Maybe push an event
         # print(f'Polled! {status}')
 
@@ -332,13 +347,16 @@ class PrinterApi:
         if proc.returncode > 0:
             print(stdout.decode("utf-8"))
             print(stderr.decode("utf-8"))
-        return proc.returncode == 0
+        if proc.returncode == 0:
+            self.pending_jobs.remove(job_id)
+            return True
+        return False
 
-    async def watch_job(self, print_job_id, job_id, item_id):
+    async def watch_job(self, printer, print_job_id, job_id, item_id):
         begin = datetime.datetime.now(datetime.timezone.utc)
-        max_time = begin + datetime.timedelta(minutes=1)
+        max_time = begin + datetime.timedelta(seconds=90)
+        reason = None
         while datetime.datetime.now(datetime.timezone.utc) < max_time:
-            await self.jobs_changed_event.wait()
             if print_job_id in self.complete_jobs:
                 # Remove from the list
                 if print_job_id in self.pending_jobs:
@@ -346,6 +364,15 @@ class PrinterApi:
                         f'Acknowledged that {print_job_id} is complete for job {job_id} - item {item_id}')
                     self.pending_jobs.remove(print_job_id)
                 return True
+            if printer in self.printing_reasons:
+                latest_reason = self.printing_reasons[printer]
+            else:
+                latest_reason = None
+            if latest_reason != reason:
+                print(f'Print job {print_job_id} changed from {reason} to {latest_reason}')
+                reason = latest_reason
+                if reason and ("Error" in reason or "Card Jam" in reason):
+                    return False
             await asyncio.sleep(0.1)
 
         print(f'Timed out on print job for {print_job_id}')
@@ -353,7 +380,7 @@ class PrinterApi:
 
     async def uses_systemd(self) -> bool:
         found_systemd = False
-        procs = [
+        params = [
             'ps',
             'aux'
         ]
@@ -423,6 +450,7 @@ class PrinterClient:
     waiting_for_disconnect: bool
     waiting_for_reconnect: bool
     waiting_for_cups_restart: bool
+    holding: bool
     current_print_job: str | None
     unexpected_disconnect: bool
 
@@ -441,6 +469,7 @@ class PrinterClient:
         self.waiting_for_cups_restart = False
         self.current_print_job = None
         self.unexpected_disconnect = False
+        self.holding = False
 
     async def ping_client(self, session: ClientSession, message: str | None = None):
         url = f'{self.config.get("url_prefix")}ping'
@@ -470,6 +499,36 @@ class PrinterClient:
         except:
             print("Could not poll job, network error maybe?")
             return None
+
+    async def hold_job(self, session: ClientSession, job: str) -> str | None:
+        url = f'{self.config.get("url_prefix")}hold-job/{job}'
+        try:
+            async with session.post(url, headers=self.access_headers) as resp:
+                r: ClientResponse = resp
+                if r.status != 200:
+                    return False
+                json = await r.json()
+                if "received" in json:
+                    return json["received"]
+                return False
+        except:
+            print("Could not hold job, network error maybe?")
+            return False
+
+    async def release_job(self, session: ClientSession, job: str) -> str | None:
+        url = f'{self.config.get("url_prefix")}release-job/{job}'
+        try:
+            async with session.post(url, headers=self.access_headers) as resp:
+                r: ClientResponse = resp
+                if r.status != 200:
+                    return False
+                json = await r.json()
+                if "received" in json:
+                    return json["received"]
+                return False
+        except:
+            print("Could not release job, network error maybe?")
+            return False
 
     async def poll_item(self, session: ClientSession, job: str) -> ItemResponse | None:
         poll_item = f'{self.config.get("url_prefix")}poll-item/{job}'
@@ -564,11 +623,12 @@ class PrinterClient:
         img2pdf.convert(*images, outputstream=stream)
         stream.seek(0)
         bytes = stream.read()
+        await self.ping_client(session, "Sending to printer")
         self.current_print_job = await self.api.send_to_printer(self.config.printer, item.id, bytes)
         if not self.current_print_job:
             await self.report_failure(session, item.id)
             return
-        job_success = await self.api.watch_job(self.current_print_job, job, item.id)
+        job_success = await self.api.watch_job(self.config.printer, self.current_print_job, job, item.id)
         if job_success:
             await self.report_success(session, item.id)
         else:
@@ -578,6 +638,7 @@ class PrinterClient:
             await self.report_failure(session, item.id)
             # This printer is misbehaving
             self.waiting_for_disconnect = True
+            await self.ping_client(session, "Printer needs to be reset")
         self.current_print_job = None
 
     async def hold_job_for_restart(self, session: ClientSession, job: str):
@@ -586,6 +647,7 @@ class PrinterClient:
         # assuming something went wrong
         # And technically we could use an event here and gather
         # But this seems more straight forward in the short term.
+        self.holding = True
         now = datetime.datetime.now(datetime.timezone.utc)
         next_hold = now + datetime.timedelta(seconds=30)
         max_time = now + datetime.timedelta(minutes=2)
@@ -606,16 +668,28 @@ class PrinterClient:
             print(
                 f'Print client {self.client_name} waited too long and will resume printing')
             self.waiting_for_cups_restart = False
+        self.holding = False
 
     async def print_job(self, session: ClientSession, job: str):
         while True:
+            if self.waiting_for_disconnect:
+                # Release this job
+                await self.release_job(session, job)
+                reason = 'Please disconnect'
+                if self.config.printer in self.api.printing_reasons:
+                    reason = self.api.printing_reasons[self.config.printer]
+                elif self.config.printer in self.api.disabled_reasons:
+                    reason = self.api.disabled_reasons[self.config.printer]
+                if not reason:
+                    reason = 'Please turn off and on again'
+                if reason and 'unknown' in reason:
+                    reason = 'Please turn off and on again'
+                await self.ping_client(self.session, f'Problem: {reason}')
+                break
             print("Polling job {}".format(job))
             item_response = await self.poll_item(session, job)
             if item_response.item:
                 await self.print_item(session, job, item_response.item)
-            if self.waiting_for_disconnect:
-                # TODO release job
-                pass
             if item_response.wait and item_response.wait > 0:
                 await asyncio.sleep(float(item_response.wait))
             if not item_response.poll_again:
@@ -631,15 +705,18 @@ class PrinterClient:
             if printer_status == PrinterStatus.DISABLED:
                 # It appears disconnected now!
                 self.waiting_for_disconnect = False
+                self.waiting_for_reconnect = True
                 print(f'Printer {printer} disconnected')
                 await self.ping_client(self.session, 'Disconnected, waiting for reconnect')
             return
         if self.waiting_for_reconnect:
             if printer_status == PrinterStatus.IDLE:
+                print(f'Printer {printer} reconnected, waiting for cups restart')
                 self.waiting_for_reconnect = False
                 self.waiting_for_cups_restart = True
                 await self.ping_client(self.session, 'Reconnected, waiting for cups restart')
-            if printer_status == PrinterStatus.PRINTING:
+            elif printer_status == PrinterStatus.PRINTING:
+                print(f'Printer {printer} reconnected with status Printing, that is odd')
                 # That's weird, it should be free unless there's a job jam or something.
                 active_job = self.api.active_jobs_kv[printer]
                 if active_job:
@@ -648,8 +725,25 @@ class PrinterClient:
                     if not await self.api.cancel_job(active_job):
                         print(
                             f'Tried to cancel job {active_job} on printer {printer}, but failed.')
+            elif printer_status == PrinterStatus.DISABLED:
+                reason = self.api.disabled_reasons[printer]
+                print(f'Printer {printer} reconnected with disabled status: {reason}')
+                if reason and "unknown" in reason:
+                    await self.ping_client(self.session, f'Turn off printer by the power button and turn it back on')
+                else:
+                    await self.ping_client(self.session, f'Disabled: {reason or "Unknown reason"}')
+                self.holding = True
+                await asyncio.sleep(random.uniform(5.0, 10.0))
+                self.holding = False
+            else:
+                print(f'Reconnected {printer} with unexpected status {printer_status}')
             return
         if self.waiting_for_cups_restart:
+            print(f'Printer {printer} waiting for cups restart')
+            await self.ping_client(self.session, 'Waiting for cups restart')
+            self.holding = True
+            await asyncio.sleep(random.uniform(2.0, 5.0))
+            self.holding = False
             # Skipping
             return
         if not self.unexpected_disconnect and printer_status == PrinterStatus.DISABLED:
@@ -715,7 +809,13 @@ class PrintManagement:
         max_wait = now + datetime.timedelta(seconds=70)
         while datetime.datetime.now(datetime.timezone.utc) < max_wait:
             # Check if all clients are finished
-            if len(self.hold) == 0:
+            holding = 0
+            for k in clients.keys():
+                client = clients[k]
+                if client.holding:
+                    holding += 1
+            if len(self.hold) == holding:
+                print(f'All {holding} clients are holding, we may proceed and restart')
                 break
             # Yield and give time to print processes to realize they should hold
             await asyncio.sleep(0.25)
