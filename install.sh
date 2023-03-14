@@ -8,7 +8,7 @@ fi
 
 source "$HOME/.cargo/env"
 
-if [ ! -d "$HOME/.pyenv" ];
+if [ ! -d "$HOME/.pyenv" ]; then
 echo "Installing pyenv"
 curl https://pyenv.run | bash
 fi
