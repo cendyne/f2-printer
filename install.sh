@@ -1,13 +1,18 @@
 #!/bin/bash
 set -e
+
+if [ ! -d "~/.rustup" ]; then
 echo "Installing rust, in case"
 curl https://sh.rustup.rs -sSf | sh
+fi
 
 source "$HOME/.cargo/env"
 
+if [ ! -d "~/.pyenv" ];
 echo "Installing pyenv"
 
 curl https://pyenv.run | bash
+fi
 
 export PYENV_ROOT="$HOME/.pyenv"
 command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
