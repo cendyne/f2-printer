@@ -1,16 +1,15 @@
 #!/bin/bash
 set -e
 
-if [ ! -d "~/.rustup" ]; then
+if [ ! -d "$HOME/.cargo" ]; then
 echo "Installing rust, in case"
 curl https://sh.rustup.rs -sSf | sh
 fi
 
 source "$HOME/.cargo/env"
 
-if [ ! -d "~/.pyenv" ];
+if [ ! -d "$HOME/.pyenv" ];
 echo "Installing pyenv"
-
 curl https://pyenv.run | bash
 fi
 
