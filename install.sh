@@ -1,5 +1,5 @@
 #!/bin/bash
-sudo apt install libffi-dev libssl-dev git curl
+set -e
 curl https://pyenv.run | bash
 curl https://sh.rustup.rs -sSf | sh
 
