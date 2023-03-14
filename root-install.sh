@@ -1,4 +1,4 @@
 #!/bin/bash
 set -e
-apt install libffi-dev libssl-dev git curl build-essential
+apt install libffi-dev libssl-dev git curl build-essential zlib1g-dev
 

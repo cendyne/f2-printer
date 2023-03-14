@@ -1,17 +1,33 @@
 #!/bin/bash
 set -e
-curl https://pyenv.run | bash
+echo "Installing rust, in case"
 curl https://sh.rustup.rs -sSf | sh
+
+source "$HOME/.cargo/env"
+
+echo "Installing pyenv"
+
+curl https://pyenv.run | bash
 
 export PYENV_ROOT="$HOME/.pyenv"
 command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
 eval "$(pyenv init -)"
 
+echo "Installing Python 3.10.10"
+
 pyenv install 3.10.10
+
+echo "Setting up environment"
 pyenv virtualenv 3.10 threedotten
+echo "Activating environment"
 pyenv activate threedotten
+echo "Installing application installer"
 pip3 install poetry
+echo "Installing dependencies"
 poetry install
+
+echo ""
+echo ""
 
 architecture=$(uname -m)
 if [[ "$architecture" == "x86_64" ]]; then
