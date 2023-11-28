@@ -6,12 +6,16 @@ import re
 import traceback
 import datetime
 import urllib.parse
+from typing import cast
 from enum import Enum
 from aiohttp.client import ClientSession
 from aiohttp.client_reqrep import ClientResponse
 from PIL import Image
 import img2pdf
 import random
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PrinterConfig:
@@ -19,10 +23,22 @@ class PrinterConfig:
     access_key: str
     printer: str
     double_print_supported: bool
+    cr80: bool
+    thermal: bool
+    columns: int
 
     def __init__(self, dict: dict) -> None:
+        self.cr80 = False
+        self.thermal = False
+        self.columns = 48
         for key in dict:
             setattr(self, key, dict[key])
+        if not self.cr80 and not self.thermal:
+            # Have a sane default
+            self.cr80 = True
+        if self.columns <= 0:
+            # Have a sane default
+            self.columns = 48
 
     def get(self, key: str):
         return getattr(self, key)
@@ -60,6 +76,331 @@ def retry(count: int, message: str):
         return inner
     return decorator
 
+@retry(10, "Document IR Image needs to retry {}")
+async def download_generic_image(url: str, session: ClientSession) -> Image.Image | None:
+    async with session.get(url) as resp:
+        r: ClientResponse = resp
+        if r.status != 200:
+            return None
+        if r.content_type == "image/png" or r.content_type == "image/webp" or r.content_type == "image/jpeg":
+            byte_response = await r.read()
+            try:
+                return Image.open(io.BytesIO(byte_response))
+            except:
+                logger.exception(f"Error while loading image from {url}")
+        return None
+
+THERMAL_ENCODING = "ascii"
+
+async def document_ir_to_esc_pos(stream: io.BytesIO, session: ClientSession, node: dict, columns:int=48, position:int=0) -> int:
+    if not isinstance(node, dict):
+        print(f"Received a non dict node: {str(node)}")
+        return 0
+    if not "type" in node:
+        print(f"Hit unsupported node: {str(node)}")
+        return 0
+    delta = 0
+    input_position = position
+    line_reset = False
+    node_type = node["type"]
+    async def read_child(child):
+        nonlocal delta, line_reset, position
+        prior_position = position
+        offset = await document_ir_to_esc_pos(stream, session, child, columns, prior_position)
+        position += offset
+        if offset < 0:
+            line_reset = True
+            delta = 0
+        else:
+            delta += offset
+        # print(f"After reading node {child['type']} with position {prior_position}-{position} due to offset {offset}")
+    async def read_children(before=None, after=None):
+        nonlocal node, stream
+        if before:
+            stream.write(before)
+        for child in node["content"]:
+            await read_child(child)
+        if after:
+            stream.write(after)
+    # print(f"Reading node {node_type}")
+    if node_type == "text" and "text" in node and isinstance(node["text"], str):
+        text = cast(str, node["text"])
+        lines = text.split("\n")
+        # print(f"Text Input: {repr(text)}")
+        first_line = True
+        for line in lines:
+            # print(f"Reading line {first_line}: {repr(line)}")
+            reset_line = False
+            if not first_line:
+                # print("Not first line, adding break")
+                line_reset = True
+                stream.write(b"\n")
+                position = 0
+                delta = 0
+                reset_line = True
+            else:
+                # print(f"This is the first line and at position {position}")
+                first_line = False
+            if line == "":
+                # print(f"Found empty line with position {position}")
+                if not reset_line:
+                    line_reset = True
+                    position = 0
+                    delta = 0
+                    # print("Adding newline")
+                    stream.write(b"\n")
+                continue
+            words = re.split(r"\s+", line)
+            first_word = True
+            for word in words:
+                wrote_space = False
+                if not first_word:
+                    if position >= columns - 1:
+                        line_reset = True
+                        # print(f"Reset line before word '{word}'")
+                        stream.write(b"\n")
+                        position = 0
+                        delta = 0
+                    else:
+                        if position > 0:
+                            wrote_space = True
+                            stream.write(b" ")
+                            position += 1
+                            delta += 1
+                else:
+                    first_word = False
+                if position == 0:
+                    stream.write(bytes(word, THERMAL_ENCODING))
+                    position = len(word)
+                    delta += len(word)
+                elif position + len(word) > columns:
+                    line_reset = True
+                    if wrote_space:
+                        stream.seek(stream.tell() - 1)
+                    # print(f"Reset line before word '{word}'")
+                    stream.write(b"\n")
+                    stream.write(bytes(word, THERMAL_ENCODING))
+                    position = len(word)
+                    delta = len(word)
+                else:
+                    stream.write(bytes(word, THERMAL_ENCODING))
+                    position += len(word)
+                    delta += len(word)
+                if position >= columns:
+                    line_reset = True
+                    stream.write(b"\n")
+                    # print(f"Reset line after word '{word}'")
+                    position = 0
+                    delta = 0
+            # print(f"Finished line at position {position}")
+    elif node_type == "array" and "content" in node and isinstance(node["content"], list):
+        await read_children()
+    elif node_type == "paragraph" and "content" in node and isinstance(node["content"], list):
+        await read_children(b"\n", b"\n")
+    elif node_type == "bold" and "content" in node and isinstance(node["content"], list):
+        await read_children(b"\x1b\x45\x01", b"\x1b\x45\x00")
+    elif node_type == "italic" and "content" in node and isinstance(node["content"], list):
+        await read_children(b"\x1b\x34\x01", b"\x1b\x34\x00")
+    elif node_type == "underline" and "content" in node and isinstance(node["content"], list):
+        await read_children(b"\x1b\x2d\x01", b"\x1b\x2d\x00")
+    elif node_type == "center" and "content" in node and isinstance(node["content"], list):
+        line_reset = True
+        # Using printer justification really does not work.
+        # Recurse as if array and rewrite the stream out centered.
+        # This will clobber images :D
+        center_stream = io.BytesIO()
+        await document_ir_to_esc_pos(center_stream, session, {"type": "array", "content": node["content"]}, columns, 0)
+        center_stream.seek(0)
+        center_bytes = center_stream.read()
+        stream.write(b"\n")
+        for line in center_bytes.split(b"\n"):
+            stream.write(line.center(columns))
+            stream.write(b"\n")
+    elif node_type == "horizontal-rule":
+        line_reset = True
+        stream.write(b"\n")
+        stream.write(b"-" * columns)
+        stream.write(b"\n")
+    elif node_type == "table" and "content" in node and isinstance(node["content"], list):
+        rows = cast(list, node["content"])
+        # This is going to be complicated.
+        # The assumption is that all cells are span 1x1
+        # we assume that the max column size in all rows is the column width for the table
+        # And that the table is split evenly (typically a bad assumption)
+        column_count = 0
+        for row in rows:
+            # Skip invalid rows
+            if not isinstance(row, list):
+                continue
+            column_count = max(column_count, len(row))
+        if position > 0:
+            stream.write(b"\n")
+            position = 0
+        line_reset = True
+        # print(f"There are {column_count} columns in this table")
+        if column_count > 0:
+            column_widths = []
+            # Add spaces inside
+            column_width = int(columns / column_count) - column_count
+            # If column width is < 4, it'll be a bad time
+
+            # Determine widths for each column
+            for column_index in range(0, column_count):
+                this_column_width = column_width
+                if column_index == 0:
+                    # The column total might not evenly divide. Give the leftovers to the first column
+                    this_column_width = column_width + (columns % column_count)
+                column_widths.append(this_column_width)
+            row_cells = dict()
+            # Now that the column widths have been decided, it is time to build and join every cell into lines
+            for row_index, row in enumerate(rows):
+                # print(f"Looking at row {str(row)}")
+                cells = dict()
+                for index, cell in enumerate(row):
+                    width = column_widths[index]
+                    node = cast(dict, cell)
+                    if not "type" in node or node["type"] != "table-cell" or not "content" in node or not isinstance(node["content"], list):
+                        # print(f"Skipping table cell node, it doesn't look right: {str(node)}")
+                        continue
+
+                    cell_stream = io.BytesIO()
+                    await document_ir_to_esc_pos(cell_stream, session, {
+                        "type": "array",
+                        "content": node["content"]
+                    }, width, 0)
+                    cell_stream.seek(0)
+                    cells[index] = cell_stream.read()
+                row_cells[row_index] = cells
+            # Now that each cell has been figured out, do some width stealing.
+            max_cell_widths = dict()
+            for column_index in range(0, column_count):
+                max_cell_width = 0
+                for row_index in range(0, len(rows)):
+                    if not column_index in row_cells[row_index]:
+                        continue
+                    max_cell_width = max(len(row_cells[row_index][column_index]), max_cell_width)
+                max_cell_widths[column_index] = max_cell_width
+
+            # Bias to give towards the left
+            for column_index in range(column_count - 1, 0, -1):
+                if not column_index in max_cell_widths:
+                    continue
+                if max_cell_widths[column_index] < column_widths[column_index]:
+                    column_widths[column_index - 1] += (column_widths[column_index] - max_cell_widths[column_index])
+                    column_widths[column_index] = max_cell_widths[column_index]
+
+            for row_index, row in enumerate(rows):
+                cells = cast(dict, row_cells[row_index])
+                # print(f"Looking at row {repr(cells)}")
+                # Now collate every cell line in a set of lines
+                lines = dict()
+                max_line = 0
+                # print(f"There are {len(cells)} cells in this row")
+                for index, cell_bytes in cells.items():
+                    cell_bytes = cast(bytes, cell_bytes)
+                    width = column_widths[index]
+                    line = 0
+                    line_bytes = []
+                    column = 0
+                    if not line in lines:
+                        lines[line] = dict()
+                    for byte in cell_bytes:
+                        if byte == "\n":
+                            lines[line][index] = b"".join(line_bytes)
+                            line_bytes = []
+                            line += 1
+                            column = 0
+                        elif column >= width:
+                            lines[line][index] = b"".join(line_bytes)
+                            line += 1
+                            column = 0
+                        else:
+                            line_bytes.append(bytes((byte,)))
+                            column += 1
+                    if len(line_bytes) > 0:
+                        lines[line][index] = b"".join(line_bytes)
+                    if len(cell_bytes) == 0:
+                        lines[line][index] = b""
+                    if column > 0:
+                        line += 1
+                    max_line = max(line, max_line)
+                # print(f"There are {max_line} lines in this row")
+                # And now, finally output all the lines grouped together.
+                if max_line > 0:
+                    for line in range(0, max_line):
+                        if not line in lines:
+                            continue
+                        for column in range(0, column_count):
+                            if column > 0:
+                                # Every column has at least one space after the last
+                                stream.write(b" ")
+                            width = column_widths[column]
+                            if not column in lines[line]:
+                                stream.write(b" " * width)
+                                continue
+                            line_content = lines[line][column]
+                            stream.write(line_content)
+                            # pad the rest
+                            # print(f"Adding padding {width} - {len(line_content)} = {width - len(line_content)}")
+                            stream.write(b" " * (width - len(line_content)))
+                        # print(f"Adding a new line after table row")
+                        stream.write(b"\n")
+    elif node_type == "image" and "url" in node and isinstance(node["url"], str):
+        url = cast(str, node["url"])
+        if url.startswith("http://") or url.startswith("https://"):
+            image = await download_generic_image(url, session)
+            if not image:
+                stream.write(b"<ERROR DOWNLOADING IMAGE>")
+            else:
+                # FUN TIMES AHEAD
+                if image.width > 800:
+                    image = image.resize((800, int(image.height * (800 / image.width) )), Image.Resampling.NEAREST)
+                if image.width < 256:
+                    image = image.resize((image.width * 2, image.height * 2), Image.Resampling.NEAREST)
+                image = image.convert("L")
+                raster_width = int((image.width + 7) / 8) * 8
+                raster_lines = int((image.height + 23) / 24)
+                raster_height = raster_lines * 24
+                # print(f"Raster {raster_width}x{raster_height}")
+
+                pixels = list(image.getdata())
+                image_stream = io.BytesIO()
+                # Set line height to 24
+                image_stream.write(b"\x1b\x33\x18")
+                for line in range(0, raster_lines):
+                    image_stream.write(bytes((0x1B, 0x2A, 33)))
+                    # Width in dots
+                    image_stream.write(bytes((raster_width & 0xFF, (raster_width & 0xFF00) >> 8)))
+                    output = bytearray(3 * raster_width)
+                    for x in range(0, raster_width):
+                        for y_slice in range(0, 3):
+                            byte = 0
+                            for y_offset in range(0, 8):
+                                y = line * 24 + y_slice * 8 + y_offset
+
+                                if x < image.width and y < image.height:
+                                    # print(f"Reviewing Pixel at {x}x{y} {pixels[y * image.width + x]} ")
+                                    if pixels[y * image.width + x] < 127:
+                                        byte |= 1 << (7 - y_offset)
+                            output[x * 3 + y_slice] = byte
+                    image_stream.write(output)
+                    image_stream.write(b"\n")
+                # Change line height to 60
+                image_stream.write(b"\x1b\x33\x3C")
+                # after = image_stream.tell()
+                image_stream.seek(0)
+                stream.write(image_stream.read())
+        stream.write(b"\n")
+        line_reset = True
+        position = 0
+    elif node_type == "cut":
+        # Pad the page and then cut
+        # Change line height to 60
+        stream.write(b"\x1b\x33\x3C")
+        stream.write(b"\n\n\n\n\n\n\x1bm")
+    if line_reset:
+        return position - input_position
+    return delta
 
 class ItemResponseItem:
     id: str
@@ -185,6 +526,8 @@ class PrinterApi:
                 if noisy:
                     print(
                         f'There are {len(self.incomplete_jobs)} incomplete jobs and {len(self.complete_jobs)} complete jobs.')
+                    # for job in self.complete_jobs:
+                    #     print(f"Job {job} is complete")
                 if job_change:
                     self.jobs_changed_event.set()
 
@@ -274,7 +617,16 @@ class PrinterApi:
         # Maybe push an event
         # print(f'Polled! {status}')
 
-    async def send_to_printer(self, printer: str, id: str, bytes: bytes) -> str | None:
+    async def send_to_thermal_printer(self, printer: str, id: str, input_bytes: bytes) -> str | None:
+        params = [
+            'lp',
+            '-d', printer,
+            '-t', id,
+            '-o', 'raw'
+        ]
+        return await self.create_lp_process_with_params(params, input_bytes, False)
+
+    async def send_to_cr80_printer(self, printer: str, id: str, input_bytes: bytes) -> str | None:
         params = [
             'lp',
             '-d', printer,
@@ -285,17 +637,19 @@ class PrinterApi:
         ]
         pdf = "pdf" in printer or "PDF" in printer
         if pdf:
-            print('')
+            # print('')
             params.append('-H')
             params.append('indefinite')
+        return await self.create_lp_process_with_params(params, input_bytes, pdf)
 
+    async def create_lp_process_with_params(self, params, input_bytes: bytes, pdf=False):
         proc = await asyncio.create_subprocess_exec(*params,
                                                     shell=False,
                                                     stdin=asyncio.subprocess.PIPE,
                                                     stdout=asyncio.subprocess.PIPE,
                                                     stderr=asyncio.subprocess.PIPE
                                                     )
-        stdout, stderr = await proc.communicate(bytes)
+        stdout, stderr = await proc.communicate(input_bytes)
         print(f'[lp exited with {proc.returncode}]')
         out = stdout.decode("utf-8").split("\n")[0]
 
@@ -309,9 +663,9 @@ class PrinterApi:
 
                 async def release():
                     print(
-                        f'PDF {job_id} - sleeping for 30 seconds before release')
+                        f'PDF {job_id} - sleeping for 5 seconds before release')
                     # 30 seconds is about how long it takes to print
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(3)
                     if tid in self.async_tasks:
                         self.async_tasks.pop(tid)
                     params = [
@@ -359,8 +713,12 @@ class PrinterApi:
         reason = None
         next_callback = begin - datetime.timedelta(seconds=60)
         now = begin
+        count = 0
         while now < max_time:
             now = datetime.datetime.now(datetime.timezone.utc)
+            noisy = count % 20 == 0
+
+            count += 1
             if now > next_callback:
                 try:
                     await callback()
@@ -375,6 +733,9 @@ class PrinterApi:
                         f'Acknowledged that {print_job_id} is complete for job {job_id} - item {item_id}')
                     self.pending_jobs.remove(print_job_id)
                 return True
+            else:
+                if noisy:
+                    print(f"Job {print_job_id} is not completed")
             if printer in self.printing_reasons:
                 latest_reason = self.printing_reasons[printer]
             else:
@@ -497,8 +858,10 @@ class PrinterClient:
                 r: ClientResponse = resp
                 if r.status == 200:
                     success = True
+                else:
+                    print(f'Status {r.status}')
         except:
-            pass
+            logger.exception(f"Error while pinging")
         return success
 
     async def poll_job(self, session: ClientSession) -> str | None:
@@ -584,6 +947,23 @@ class PrinterClient:
                 return None
             return await r.read()
 
+    @retry(10, "Could not download item thermal, trying again after {} seconds")
+    async def item_thermal(self, session: ClientSession, item: str) -> dict | None:
+        url = f'{self.config.get("url_prefix")}item-thermal/{item}'
+        async with session.get(url, headers=self.access_headers) as resp:
+            r: ClientResponse = resp
+            if r.status != 200:
+                return None
+            try:
+                json_document = await r.json()
+                if not isinstance(json_document, dict):
+                    print(f"Result was not a dict, while one was expected")
+                    return None
+                return cast(dict, json_document)
+            except:
+                logger.exception("Error parsing json")
+                return None
+
     @retry(10, "Could not report item success, trying again after {} seconds")
     async def item_success(self, session: ClientSession, item: str) -> None | bool:
         url = f'{self.config.get("url_prefix")}item-succeeded/{item}'
@@ -634,7 +1014,7 @@ class PrinterClient:
         else:
             print("Item successful")
 
-    async def print_item(self, session: ClientSession, job: str, item: ItemResponseItem):
+    async def print_cr80_item(self, session: ClientSession, job: str, item: ItemResponseItem):
         print("Polled item {}".format(item.label))
         images = []
         front = await self.item_frontside(session, item.id)
@@ -650,10 +1030,10 @@ class PrinterClient:
         stream = io.BytesIO()
         img2pdf.convert(*images, outputstream=stream)
         stream.seek(0)
-        bytes = stream.read()
+        output_bytes = stream.read()
         await self.ping_client(session, "Sending to printer")
         printer = self.config.printer
-        self.current_print_job = await self.api.send_to_printer(self.config.printer, item.id, bytes)
+        self.current_print_job = await self.api.send_to_cr80_printer(self.config.printer, item.id, output_bytes)
         if not self.current_print_job:
             await self.report_failure(session, item.id)
             return
@@ -666,13 +1046,42 @@ class PrinterClient:
                 reason = self.api.printing_reasons[printer]
             elif printer in self.api.disabled_reasons:
                 reason = self.api.disabled_reasons[printer]
-            clean_printer = (reason and "Clean printer" in reason) or False
-            if clean_printer != self.clean_printer:
-                if clean_printer:
-                    print(f'Printer {printer} needs to be cleaned!')
-                else:
-                    print(f'Printer {printer} has been cleaned.')
+            # clean_printer = (reason and "Clean printer" in reason) or False
+            # if clean_printer != self.clean_printer:
+            #     if clean_printer:
+            #         print(f'Printer {printer} needs to be cleaned!')
+            #     else:
+            #         print(f'Printer {printer} has been cleaned.')
             self.clean_printer = reason and "Clean printer" in reason
+
+        job_success = await self.api.watch_job(self.config.printer, self.current_print_job, job, item.id, hold_callback)
+        if job_success:
+            await self.report_success(session, item.id)
+        else:
+            # Cancel job
+            if not await self.api.cancel_job(self.current_print_job):
+                print("Spicy, can't cancel the job")
+            await self.report_failure(session, item.id)
+            # This printer is misbehaving
+            self.waiting_for_disconnect = True
+            await self.ping_client(session, "Printer needs to be reset")
+        self.current_print_job = None
+
+    async def print_thermal_item(self, session: ClientSession, job: str, item: ItemResponseItem):
+        document = await self.item_thermal(session, item.id)
+        stream = io.BytesIO()
+        stream.write(b"\x1b@") # Initialize
+        # Write document
+        await document_ir_to_esc_pos(stream, session, document, self.config.columns)
+        # Pad the ending and then cut
+        stream.seek(0)
+        output_bytes = stream.read()
+        # with open(f"/tmp/print-{item.id}.bin", "wb") as bin:
+        #     bin.write(output_bytes)
+        # print(f"Wrote to /tmp/print-{item.id}.bin")
+        self.current_print_job = await self.api.send_to_thermal_printer(self.config.printer, item.id, output_bytes)
+        async def hold_callback():
+            await self.item_hold(session, item.id)
 
         job_success = await self.api.watch_job(self.config.printer, self.current_print_job, job, item.id, hold_callback)
         if job_success:
@@ -735,7 +1144,13 @@ class PrinterClient:
             print("Polling job {}".format(job))
             item_response = await self.poll_item(session, job)
             if item_response.item:
-                await self.print_item(session, job, item_response.item)
+                if self.config.thermal:
+                    await self.print_thermal_item(session, job, item_response.item)
+                elif self.config.cr80:
+                    await self.print_cr80_item(session, job, item_response.item)
+                else:
+                    await self.ping_client(self.session, f'Problem: Not configured for thermal or cr80')
+                    break
             if item_response.wait and item_response.wait > 0:
                 await asyncio.sleep(float(item_response.wait))
             if not item_response.poll_again:

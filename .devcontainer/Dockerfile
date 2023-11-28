@@ -25,7 +25,9 @@ RUN DEBIAN_FRONTEND=noninteractive \
         libffi-dev \
         liblzma-dev \
         cups \
-        printer-driver-cups-pdf
+        printer-driver-cups-pdf \
+    # Need to set root password to access it over cups
+    && echo "root:root" | chpasswd
 RUN cat /etc/cups/cups-pdf.conf \
     | sed 's#Out \${HOME}/PDF#Out /workspaces/f2-printer/pdf#' \
     > /etc/cups/cups-pdf.conf.new \

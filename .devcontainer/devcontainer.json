@@ -8,7 +8,7 @@
 	// "features": {},
 
 	// 👇 Use 'forwardPorts' to make a list of ports inside the container available locally.
-	// "forwardPorts": [],
+	"forwardPorts": [8631],
 
 	// 👇 Use 'postCreateCommand' to run commands after the container is created.
 	// "postCreateCommand": "",
@@ -19,7 +19,12 @@
         "vscode": {
             "extensions":["ms-python.python", "njpwerner.autodocstring"]
             }
-        }
+		},
+		"portsAttributes": {
+			"8631": {
+				"label": "CUPS"
+			}
+		}
 
 	// 👇 Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
 	// "remoteUser": "root"
