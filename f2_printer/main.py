@@ -1069,6 +1069,11 @@ class PrinterClient:
 
     async def print_thermal_item(self, session: ClientSession, job: str, item: ItemResponseItem):
         document = await self.item_thermal(session, item.id)
+        if not document:
+            # Cancel job
+            if not await self.api.cancel_job(self.current_print_job):
+                print("Spicy, can't cancel the job")
+            await self.report_failure(session, item.id)
         stream = io.BytesIO()
         stream.write(b"\x1b@") # Initialize
         # Write document
