@@ -393,6 +393,42 @@ async def document_ir_to_esc_pos(stream: io.BytesIO, session: ClientSession, nod
         stream.write(b"\n")
         line_reset = True
         position = 0
+    elif node_type == "qr" and "text" in node and isinstance(node["text"], str):
+        text = node["text"]
+        cell_size = 3
+        line_reset = True
+        position = 0
+        if "size" in node and isinstance(node["size"], int) and node["size"] > 0 and node["size"] <= 16:
+            cell_size = node["size"]
+        if len(text) > 0 and len(text) < 7089:
+            # No binary support, only text right now
+            line_reset = True
+            # Set and print symbol GS ( k pL pH cn(49 = qr) fn(sub command) parameters
+            # 49 = 0x31
+            # Set QR Code model 1 (49) - Page 115 in star escpos_cm_en.pdf
+            # GS '(' 'k' 3 0 49 65 49 0
+            stream.write(bytes([0x1d, 0x28, 0x6b, 3, 0, 49, 65, 49, 0]))
+            # Set QR Code module size (square size) - page 115 in star escpos_cm_en.pdf
+            # GS '(' 'k' 3 0 49 67 code_size
+            stream.write(bytes([0x1d, 0x28, 0x6b, 3, 0, 49, 67, cell_size]))
+            # Set error correction level - page 116 in star escpos_cm_en.pdf
+            # GS '(' 'k' 3 0 49 69 48 (low)
+            stream.write(bytes([0x1d, 0x28, 0x6b, 4, 0, 49, 69, 48]))
+            # QR Code symbol data storage - page 116 in star escpos_cm_en.pdf
+            # GS '(' 'k' low high 49 80 48
+            content_length = len(text) + 3
+            cl_low = 0xff & content_length
+            cl_high = (content_length & 0xff00) >> 8
+            stream.write(bytes([0x1d, 0x28, 0x6b, cl_low, cl_high, 49, 80, 48]))
+            # QR Code content
+            stream.write(bytes(text, THERMAL_ENCODING))
+            # Print QR Code - page 117 in star escpos_cm_en.pdf
+            # GS '(' 'k' 3 0 49 81 48
+            stream.write(bytes([0x1d, 0x28, 0x6b, 3, 0, 49, 81, 48]))
+        else:
+            stream.write(b"<<<QR CODE TOO BIG>>>")
+            stream.write(b"\n")
+
     elif node_type == "cut":
         # Pad the page and then cut
         # Change line height to 60
