@@ -289,6 +289,27 @@ async def document_ir_to_esc_pos(stream: io.BytesIO, session: ClientSession, nod
                     column_widths[column_index - 1] += (column_widths[column_index] - max_cell_widths[column_index])
                     column_widths[column_index] = max_cell_widths[column_index]
 
+            # Now redo the cells with the bias taken into account
+            row_cells = dict()
+            for row_index, row in enumerate(rows):
+                # print(f"Looking at row {str(row)}")
+                cells = dict()
+                for index, cell in enumerate(row):
+                    width = column_widths[index]
+                    node = cast(dict, cell)
+                    if not "type" in node or node["type"] != "table-cell" or not "content" in node or not isinstance(node["content"], list):
+                        # print(f"Skipping table cell node, it doesn't look right: {str(node)}")
+                        continue
+
+                    cell_stream = io.BytesIO()
+                    await document_ir_to_esc_pos(cell_stream, session, {
+                        "type": "array",
+                        "content": node["content"]
+                    }, width, 0)
+                    cell_stream.seek(0)
+                    cells[index] = cell_stream.read()
+                row_cells[row_index] = cells
+
             for row_index, row in enumerate(rows):
                 cells = cast(dict, row_cells[row_index])
                 # print(f"Looking at row {repr(cells)}")
@@ -305,7 +326,9 @@ async def document_ir_to_esc_pos(stream: io.BytesIO, session: ClientSession, nod
                     if not line in lines:
                         lines[line] = dict()
                     for byte in cell_bytes:
-                        if byte == "\n":
+                        if byte < 20:
+                            print(f"Ascii code {byte} found")
+                        if byte == 0x0A: # new line
                             lines[line][index] = b"".join(line_bytes)
                             line_bytes = []
                             line += 1
@@ -317,6 +340,8 @@ async def document_ir_to_esc_pos(stream: io.BytesIO, session: ClientSession, nod
                         else:
                             line_bytes.append(bytes((byte,)))
                             column += 1
+                        if not line in lines:
+                            lines[line] = dict()
                     if len(line_bytes) > 0:
                         lines[line][index] = b"".join(line_bytes)
                     if len(cell_bytes) == 0:
@@ -339,9 +364,13 @@ async def document_ir_to_esc_pos(stream: io.BytesIO, session: ClientSession, nod
                                 stream.write(b" " * width)
                                 continue
                             line_content = lines[line][column]
+                            if column == column_count - 1:
+                                # Right justify the right most column, it is usually a price
+                                stream.write(b" " * (width -len(line_content)))
                             stream.write(line_content)
                             # pad the rest
-                            # print(f"Adding padding {width} - {len(line_content)} = {width - len(line_content)}")
+                            print(f"Cell: {line_content}")
+                            print(f"Adding padding {width} - {len(line_content)} = {width - len(line_content)}")
                             stream.write(b" " * (width - len(line_content)))
                         # print(f"Adding a new line after table row")
                         stream.write(b"\n")
