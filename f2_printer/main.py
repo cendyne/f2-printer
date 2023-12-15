@@ -327,7 +327,8 @@ async def document_ir_to_esc_pos(stream: io.BytesIO, session: ClientSession, nod
                         lines[line] = dict()
                     for byte in cell_bytes:
                         if byte < 20:
-                            print(f"Ascii code {byte} found")
+                            # print(f"Ascii code {byte} found")
+                            pass
                         if byte == 0x0A: # new line
                             lines[line][index] = b"".join(line_bytes)
                             line_bytes = []
@@ -369,8 +370,8 @@ async def document_ir_to_esc_pos(stream: io.BytesIO, session: ClientSession, nod
                                 stream.write(b" " * (width -len(line_content)))
                             stream.write(line_content)
                             # pad the rest
-                            print(f"Cell: {line_content}")
-                            print(f"Adding padding {width} - {len(line_content)} = {width - len(line_content)}")
+                            # print(f"Cell: {line_content}")
+                            # print(f"Adding padding {width} - {len(line_content)} = {width - len(line_content)}")
                             stream.write(b" " * (width - len(line_content)))
                         # print(f"Adding a new line after table row")
                         stream.write(b"\n")
