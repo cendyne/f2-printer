@@ -3,6 +3,7 @@ import asyncio
 import json
 import sys
 import re
+import time
 import traceback
 import datetime
 import urllib.parse
@@ -26,11 +27,13 @@ class PrinterConfig:
     cr80: bool
     thermal: bool
     columns: int
+    delay: float
 
     def __init__(self, dict: dict) -> None:
         self.cr80 = False
         self.thermal = False
         self.columns = 48
+        self.delay = 0.0
         for key in dict:
             setattr(self, key, dict[key])
         if not self.cr80 and not self.thermal:
@@ -39,6 +42,12 @@ class PrinterConfig:
         if self.columns <= 0:
             # Have a sane default
             self.columns = 48
+        if isinstance(self.delay, int):
+            self.delay = float(self.delay)
+        if self.delay < 0.0:
+            self.delay = 0.0
+        if self.delay > 60.0:
+            self.delay = 60.0
 
     def get(self, key: str):
         return getattr(self, key)
@@ -1215,6 +1224,8 @@ class PrinterClient:
             print("Polling job {}".format(job))
             item_response = await self.poll_item(session, job)
             if item_response.item:
+                if self.config.delay > 0.0:
+                    time.sleep(self.config.delay)
                 if self.config.thermal:
                     await self.print_thermal_item(session, job, item_response.item)
                 elif self.config.cr80:
