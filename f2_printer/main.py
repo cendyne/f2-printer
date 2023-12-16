@@ -692,13 +692,41 @@ class PrinterApi:
         # Maybe push an event
         # print(f'Polled! {status}')
 
-    async def send_to_thermal_printer(self, printer: str, id: str, input_bytes: bytes) -> str | None:
+    async def send_to_thermal_printer(self, printer: str, id: str, input_bytes: bytes, columns: int) -> str | None:
         params = [
             'lp',
             '-d', printer,
+            '-o', 'raw',
             '-t', id,
-            '-o', 'raw'
         ]
+        if "pdf" in printer or "PDF" in printer:
+            width = int(columns * 2.6)
+            params = [
+                'lp',
+                '-d', printer,
+                '-o', 'fit-to-page',
+                '-o', f'media=custom_{width}x120mm_{width}x120mm',
+                '-t', id,
+            ]
+            # Rewrite the body to make it more text friendly
+            transformed_bytes = []
+            for byte in input_bytes:
+                if (byte >= 32 and byte <= 126) or byte == 9 or byte == 10 or byte == 13:
+                    transformed_bytes.append(bytes([byte]))
+                elif byte == 27:
+                    transformed_bytes.append(b"ESC ")
+                elif byte == 28:
+                    transformed_bytes.append(b"FS ")
+                elif byte == 29:
+                    transformed_bytes.append(b"GS ")
+                elif byte == 30:
+                    transformed_bytes.append(b"RS ")
+                elif byte == 31:
+                    transformed_bytes.append(b"US ")
+                else:
+                    transformed_bytes.append(bytes(f"{byte} ", "utf-8"))
+
+            input_bytes = b"".join(transformed_bytes)
         return await self.create_lp_process_with_params(params, input_bytes, False)
 
     async def send_to_cr80_printer(self, printer: str, id: str, input_bytes: bytes) -> str | None:
@@ -1159,7 +1187,7 @@ class PrinterClient:
         # with open(f"/tmp/print-{item.id}.bin", "wb") as bin:
         #     bin.write(output_bytes)
         # print(f"Wrote to /tmp/print-{item.id}.bin")
-        self.current_print_job = await self.api.send_to_thermal_printer(self.config.printer, item.id, output_bytes)
+        self.current_print_job = await self.api.send_to_thermal_printer(self.config.printer, item.id, output_bytes, self.config.columns)
         async def hold_callback():
             await self.item_hold(session, item.id)
 
