@@ -69,5 +69,13 @@ Note that the `print.json` file would be the same name as you did above.
 To set up the machine, use `root-install.sh` on a fresh debian install.
 Run that as root.
 
+You may want to install the driver for the printer, which can be found at:
+https://www.hidglobal.com/drivers/41707
+
+It does list some really old 32 bit linux systems, it actually still works fine on 64 bit.
+
+Make sure to set up the printer in the cups admin at https://localhost:631 (ignore the cert error),
+and to select the correct ribbon type that is inserted.
+
 A handy script called `start.sh` is ready for you.
 It expects all the printers are set up (as described above) in `config/print.json`.
