@@ -729,15 +729,20 @@ class PrinterApi:
             input_bytes = b"".join(transformed_bytes)
         return await self.create_lp_process_with_params(params, input_bytes, False)
 
-    async def send_to_cr80_printer(self, printer: str, id: str, input_bytes: bytes) -> str | None:
+    async def send_to_cr80_printer(self, printer: str, id: str, input_bytes: bytes, double_sided: bool) -> str | None:
         params = [
             'lp',
             '-d', printer,
             '-o', 'fit-to-page',
             '-o', 'media=custom_53.62x85.37mm_53.62x85.37mm',
-            '-o', 'sides=two-sided-short-edge',
-            '-t', id
         ]
+        if double_sided:
+            params.append('-o')
+            params.append('sides=two-sided-short-edge')
+        # Finally add the ID
+        params.append('-t')
+        params.append(id)
+
         pdf = "pdf" in printer or "PDF" in printer
         if pdf:
             # print('')
@@ -1124,11 +1129,13 @@ class PrinterClient:
         if front:
             images.append(front)
             print("Got front {}".format(item.id))
-        if item.double_sided:
+        double_sided = False
+        if item.double_sided and self.config.double_print_supported:
             backside = await self.item_backside(session, item.id)
             if backside:
                 images.append(backside)
                 print("Got back {}".format(item.id))
+                double_sided = True
         print("Got {} images".format(len(images)))
         stream = io.BytesIO()
         img2pdf.convert(*images, outputstream=stream)
@@ -1136,7 +1143,7 @@ class PrinterClient:
         output_bytes = stream.read()
         await self.ping_client(session, "Sending to printer")
         printer = self.config.printer
-        self.current_print_job = await self.api.send_to_cr80_printer(self.config.printer, item.id, output_bytes)
+        self.current_print_job = await self.api.send_to_cr80_printer(self.config.printer, item.id, output_bytes, double_sided)
         if not self.current_print_job:
             await self.report_failure(session, item.id)
             return
