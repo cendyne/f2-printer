@@ -39,7 +39,9 @@ export PATH="$HOME/.local/bin:$PATH"
 echo "Installing dependencies"
 poetry config virtualenvs.in-project true
 export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
-python -m keyring --disable
+if [ ! -f "$HOME/.config/python_keyring/keyringrc.cfg" ]; then
+  python -m keyring --disable
+fi
 poetry install || true
 
 echo ""
