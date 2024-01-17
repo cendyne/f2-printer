@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
-apt install libffi-dev libssl-dev git curl build-essential zlib1g-dev
+apt install libffi-dev libssl-dev git curl build-essential zlib1g-dev tk-dev libsqlite3-dev libbz2-dev liblzma-dev libreadline-dev libncurses-dev
 dir=$(pwd)
-cat << EOF /tmp/PrintServer.desktop
+cat < EOF /tmp/PrintServer.desktop
 #!/usr/bin/env xdg-open
 
 [Desktop Entry]
