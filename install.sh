@@ -21,8 +21,12 @@ echo "Installing Python 3.10.10"
 
 pyenv install --skip-existing 3.10.10
 
-
+# it is fine if the following has errors while searching
+set +e
 search=$(pyenv virtualenvs | grep "threedotten")
+# restore error condition
+set -e
+
 if [ -z "$search" ]; then
 echo "Setting up environment"
 pyenv virtualenv 3.10 threedotten
@@ -46,6 +50,9 @@ poetry install || true
 
 echo ""
 echo ""
+
+# it is fine if the following has errors while searching
+set +e
 
 if [ -f "$HOME/.bashrc" ]; then
   search=$(grep "PYENV_ROOT" "$HOME/.bashrc")
