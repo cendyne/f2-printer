@@ -19,19 +19,55 @@ eval "$(pyenv init -)"
 
 echo "Installing Python 3.10.10"
 
-pyenv install 3.10.10
+pyenv install --skip-existing 3.10.10
 
+
+search=$(pyenv virtualenvs | grep "threedotten")
+if [ -z "$search" ]; then
 echo "Setting up environment"
 pyenv virtualenv 3.10 threedotten
+else
+echo "threedotten environment already set up"
+fi
 echo "Activating environment"
 pyenv activate threedotten
+
 echo "Installing application installer"
-pip3 install poetry
+curl -sSL https://install.python-poetry.org | python3 -
+export PATH="$HOME/.local/bin:$PATH"
+
 echo "Installing dependencies"
+poetry config virtualenvs.in-project true
 poetry install
 
 echo ""
 echo ""
+
+if [ -f "$HOME/.bashrc" ]; then
+  search=$(grep "PYENV_ROOT" "$HOME/.bashrc")
+  if [ -z "$search" ]; then
+cat << EOF >> "$HOME/.bashrc"
+export PATH="\$HOME/.local/bin:\$PATH"
+export PYENV_ROOT="\$HOME/.pyenv"
+export PATH="\$PYENV_ROOT/bin:\$PATH"
+eval "\$(pyenv virtualenv-init -)"
+EOF
+echo "Installed pyenv into bash, please begin a new session"
+  fi
+fi
+
+if [ -f "$HOME/.zshrc" ]; then
+  search=$(grep "PYENV_ROOT" "$HOME/.zshrc")
+  if [ -z "$search" ]; then
+cat << EOF >> "$HOME/.zshrc"
+export PATH="\$HOME/.local/bin:\$PATH"
+export PYENV_ROOT="\$HOME/.pyenv"
+export PATH="\$PYENV_ROOT/bin:\$PATH"
+eval "\$(pyenv virtualenv-init -)"
+EOF
+echo "Installed pyenv into zsh, please begin a new session"
+  fi
+fi
 
 architecture=$(uname -m)
 if [[ "$architecture" == "x86_64" ]]; then
