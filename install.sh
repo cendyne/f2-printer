@@ -35,9 +35,9 @@ echo ""
 
 architecture=$(uname -m)
 if [[ "$architecture" == "x86_64" ]]; then
-  echo "Download LINUX 64 BIT DRIVER at https://www3.hidglobal.com/drivers/24365"
+  echo "Download LINUX 64 BIT DRIVER at https://www.hidglobal.com/drivers/41707"
 elif [[ "$architecture" == "x86" ]]; then
-  echo "Download LINUX 64 BIT DRIVER at https://www3.hidglobal.com/drivers/24363"
+  echo "Download LINUX 64 BIT DRIVER at https://www.hidglobal.com/drivers/41707"
 else
   echo "This platform $architecture does not support HID FARGO DTC1250E drivers"
 fi
