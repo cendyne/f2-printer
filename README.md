@@ -38,7 +38,7 @@ For example a thermal printer
     "access_key": "ABCDwhateverwhatever",
     "printer": "NameHere",
     "thermal": true,
-    "columns": 80
+    "columns": 48
   }
 }
 ```
