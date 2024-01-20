@@ -1,5 +1,8 @@
 #!/bin/bash
 set -e
+
+export PATH="/usr/sbin/":$PATH
+
 apt install libffi-dev libssl-dev git curl build-essential zlib1g-dev tk-dev libsqlite3-dev libbz2-dev liblzma-dev libreadline-dev libncurses-dev libcupsimage2
 sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
 dir=$(pwd)
