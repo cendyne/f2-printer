@@ -4,9 +4,6 @@ A utility to print badges to a CR80 printer from a queue system
 
 Also converts partial document-ir to ESC/POS
 
-## Setup
-
-Run `poetry run python3 setup.py`
 
 ## Local development
 
@@ -57,12 +54,35 @@ For example a CR80 printer
 }
 ```
 
-And finally to run, do something like...
-```
-poetry run print config/print.json
+With Dev Containers, `cups-pdf` is installed, so you should be able to use that.
+Files will appear in the `pdf` folder.
+
+Change the URL and access key as needed and save to `config/print.json`
+
+```json
+{
+  "FirstPrinter": {
+    "url_prefix": "http://192.168.1.100:8000/registration/printing/",
+    "access_key": "ABCDwhateverwhatever",
+    "printer": "cups-pdf",
+    "thermal": true,
+    "columns": 48
+  },
+  "SecondPrinter": {
+    "url_prefix": "http://192.168.1.100:8000/registration/printing/",
+    "access_key": "ABCDwhateverwhatever",
+    "printer": "cups-pdf",
+    "double_print_supported": true,
+    "cr80": true
+  }
+}
 ```
 
-Note that the `print.json` file would be the same name as you did above.
+And finally to run it, use:
+
+```bash
+./start.sh
+```
 
 ## Operate
 
